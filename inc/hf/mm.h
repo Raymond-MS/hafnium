@@ -62,6 +62,7 @@
 #define MM_MODE_INVALID UINT32_C(0x0010)
 #define MM_MODE_UNOWNED UINT32_C(0x0020)
 #define MM_MODE_SHARED  UINT32_C(0x0040)
+#define MM_MODE_NS      UINT32_C(0x0080)
 
 /* Specifies if a mapping will be a user mapping(EL0). */
 #define MM_MODE_USER    UINT32_C(0x0200)

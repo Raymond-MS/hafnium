@@ -2566,6 +2566,7 @@ static struct ffa_value ffa_features_function(uint32_t func,
 	case FFA_PARTITION_INFO_GET_REGS_64:
 	case FFA_MSG_SEND_DIRECT_REQ2_64:
 	case FFA_MSG_SEND_DIRECT_RESP2_64:
+	case FFA_NS_RES_INFO_GET:
 		if (FFA_VERSION_1_2 > FFA_VERSION_COMPILED) {
 			return ffa_error(FFA_NOT_SUPPORTED);
 		}
@@ -5009,4 +5010,81 @@ int64_t api_hf_interrupt_send_ipi(uint32_t target_vcpu_id, struct vcpu *current)
 	hf_ipi_send_interrupt(vm, target_vcpu_index);
 
 	return 0;
+}
+
+struct ffa_value api_ffa_ns_res_info_get(struct vcpu *current, struct ffa_value args)
+{
+	struct ffa_value ret;
+	struct vm_locked vm_locked;
+	struct vm_locked from_locked = vm_lock(current->vm);
+	bool id_found = false;
+	ffa_address_map_desc *amd;
+	ffa_resource_info_desc *desc;
+	/* Endpoint ID is only valid if Target S-Endpoint ID valid flag is set. */
+	uint16_t target_id = (args.arg2 & 0x01) ? args.arg1 : 0;
+
+	/* Acquire receiver's RX buffer. */
+	if (!ffa_setup_acquire_receiver_rx(from_locked, &ret)) {
+		dlog_verbose("Failed to acquire RX buffer for VM %x\n", from_locked.vm->id);
+		return ret;
+	}
+
+	/* Check if the mailbox is busy. */
+	if (vm_is_mailbox_busy(from_locked)) {
+		dlog_verbose("RX buffer not ready.\n");
+		return ffa_error(FFA_BUSY);
+	}
+
+	/* Initialize the resource descriptor. */
+	desc = from_locked.vm->mailbox.recv;
+	desc->header.amd_size = sizeof(ffa_address_map_desc);
+	desc->header.amd_count = 0;
+	desc->header.amd_offset = (uint32_t)(size_t)&(((ffa_resource_info_desc *)0)->amd_array);
+
+	/* Initialize the first address map descriptor. */
+	amd = &desc->amd_array;
+	amd[0].base_address = 0;
+	amd[0].endpoint_id = 0;
+	amd[0].page_count = 0;
+	amd[0].permissions = 0;
+
+	/* Iterate through the vms to inspect their page table information. */
+	for (ffa_vm_count_t vm_idx = 0; vm_idx < vm_get_count(); vm_idx++) {
+		vm_locked = vm_lock(vm_find_index(vm_idx));
+
+		/* If a specific target endpoint ID has been specified, only look for that ID. */
+		dlog_verbose("api_ffa_ns_res_info_get: idx: %d, id: %x, vm_count: %d, target_id: %x\n", 
+					  vm_idx, vm_locked.vm->id, vm_get_count(), target_id);
+		if (target_id) {
+			if (target_id == vm_locked.vm->id) {
+				dlog_verbose("api_ffa_ns_res_info_get: target_id: %x, found\n", target_id);
+				id_found = true;
+			} else {
+				goto end;
+			}
+		}
+
+		/* Traverse the page table. */
+		ret = ffa_memory_traverse_ptable(from_locked, vm_locked);
+end:
+		vm_unlock(&vm_locked);
+
+		/* If we found the target endpoint, we can exit early, no need to continue. */
+		if (id_found) {
+			break;
+		/* If there was an error, exit and return it. */
+		} else if (ret.func != FFA_SUCCESS_64) {
+			break;
+		}
+	}
+
+	vm_unlock(&from_locked);
+
+	/* If the target endpoint ID was specified but couldn't be found, invalid endpoint ID. */
+	if (target_id && (id_found == false)) {
+		dlog_error("api_ffa_ns_res_info_get: Invalid Endpoint ID: %x\n", target_id);
+		return ffa_error(FFA_INVALID_PARAMETERS);
+	}
+
+	return ret;
 }

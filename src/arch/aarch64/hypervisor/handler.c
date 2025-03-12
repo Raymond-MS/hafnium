@@ -732,6 +732,9 @@ static bool ffa_handler(struct ffa_value *args, struct vcpu *current,
 	case FFA_ERROR_32:
 		*args = plat_ffa_error_32(current, next, args->arg2);
 		return true;
+	case FFA_NS_RES_INFO_GET:
+		*args = api_ffa_ns_res_info_get(current, *args);
+		return true;
 
 	default:
 		return false;

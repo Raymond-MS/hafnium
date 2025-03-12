@@ -10,6 +10,7 @@
 
 #include "hf/arch/memcpy_trapped.h"
 #include "hf/arch/mm.h"
+#include "hf/arch/vm.h"
 
 #include "hf/addr.h"
 #include "hf/check.h"
@@ -4056,5 +4057,133 @@ struct ffa_value ffa_memory_reclaim(struct vm_locked to_locked,
 
 out:
 	share_states_unlock(&share_states);
+	return ret;
+}
+
+static struct ffa_value ffa_memory_traverse_ptable_recursive(
+							struct vm_locked vm_locked,
+							struct vm_locked from_locked, 
+							struct mm_page_table* page_table, 
+							uint8_t curr_level, 
+							bool stage1)
+{
+	ffa_address_map_desc *amd;
+	ffa_resource_info_desc *desc;
+	struct vm *vm = from_locked.vm;
+	struct mm_page_table *ptable;
+	pte_t entry;
+	pte_t next_entry;
+	uint64_t attrs;
+	uint32_t mode;
+	uint64_t i;
+	uint8_t pxn = 0;
+	uint8_t uxn = 0;
+	uint8_t permissions;
+	uint32_t amd_count;
+
+	/* Loop through all page table entries. */
+	for (i = 0; i < MM_PTE_PER_PAGE; i++) {
+		/* If the table is invalid, continue. */
+		if (!arch_mm_pte_is_present(page_table->entries[i], curr_level)) {
+			continue;
+		/* If the page table is valid but is another table, call down again. */
+		} else if (arch_mm_pte_is_table(page_table->entries[i], curr_level)) {
+			ptable = (struct mm_page_table*)ptr_from_va(
+				va_from_pa(arch_mm_table_from_pte(page_table->entries[i], curr_level)));
+			ffa_memory_traverse_ptable_recursive(vm_locked, from_locked, 
+				ptable, curr_level - 1, stage1);
+		/* Otherwise, we found a valid physical address. */
+		} else {
+			/* Extract the page table attributes. */
+			attrs = arch_mm_pte_attrs(page_table->entries[i], curr_level);
+
+			/* Extract the mode given the attributes. */
+			if (stage1) {
+				mode = arch_mm_stage1_attrs_to_mode(attrs);
+				pxn |= (!(attrs & (UINT64_C(1) << 53))) ? MM_MODE_X : 0;
+				uxn |= (!(attrs & (UINT64_C(1) << 54))) ? MM_MODE_X : 0;
+			} else {
+				mode = arch_mm_stage2_attrs_to_mode(attrs);
+				pxn |= (!(attrs & (UINT64_C(1) << 53))) ? MM_MODE_X : 0;
+				uxn |= (!(attrs & (UINT64_C(1) << 53))) ? MM_MODE_X : 0;
+			}
+
+			/* Only looking for non-secure pages. */
+			if (mode & MM_MODE_NS) {
+				/* Strip off the upper and lower attributes. */
+				entry = page_table->entries[i] & 0xFFFFFFFF000;
+				desc = vm->mailbox.recv;
+				amd = &desc->amd_array;
+
+				/* Need to grab the previous entry to calculate the next entry. */
+				amd_count = desc->header.amd_count;
+				if (amd_count != 0) {
+					next_entry = amd[amd_count - 1].base_address + 
+					(PAGE_SIZE * amd[amd_count - 1].page_count);
+				} else {
+					next_entry = 0;
+				}
+				/* Check if the current address is continguous with the previous. */
+				if (next_entry == entry) {
+					/* If so, update the page count of the previous AMD. */
+					 amd[amd_count - 1].page_count += 1;
+				/* Otherwise, add a new address map descriptor. */
+				} else {
+					/* Determine the privileged and unprivileged permissions. */
+					pxn |= (mode & MM_MODE_R);
+					pxn |= (mode & MM_MODE_W);
+					uxn |= (mode & MM_MODE_R);
+					uxn |= (mode & MM_MODE_W);
+					permissions = uxn | (pxn << 4);
+
+					/* Setup the address map descriptor. */
+					amd[amd_count].base_address = entry;
+					amd[amd_count].endpoint_id = vm_locked.vm->id;
+					amd[amd_count].page_count = 1;
+					amd[amd_count].permissions = permissions;
+					desc->header.amd_count += 1;
+
+					dlog_verbose(
+						"Valid base NS PA: %lx found in vm: %x with permissions: %x\n",
+						entry, vm_locked.vm->id, permissions);
+				}
+
+				/* Update the rx buffer info. */
+				vm->mailbox.recv_func = FFA_NS_RES_INFO_GET;
+				vm->mailbox.recv_size = (sizeof(ffa_resource_info_desc_header) + 
+					(sizeof(ffa_address_map_desc) * desc->header.amd_count));
+				vm->mailbox.recv_sender = HF_VM_ID_BASE;
+			}
+		}
+	}
+
+	return (struct ffa_value){.func = FFA_SUCCESS_64};
+}
+
+struct ffa_value ffa_memory_traverse_ptable(struct vm_locked from_locked, 
+											struct vm_locked vm_locked)
+{
+	struct vm *vm = vm_locked.vm;
+	struct ffa_value ret;
+	struct mm_ptable ptable;
+	struct mm_page_table *page_table;
+	uint8_t curr_level;
+
+	/* Determine if we are traversing an EL0 partition, 
+	 * if so traverse page table normally. */
+	if (vm->el0_partition) {
+		ptable = vm->ptable;
+		curr_level = arch_mm_stage1_max_level();
+	/* Otherwise, traverse the non-secure page table. */
+	} else {
+		ptable = vm->arch.ptable_ns;
+		curr_level = arch_mm_stage2_max_level();
+	}
+
+	/* Extract the page table from the physical address. */
+	page_table = (struct mm_page_table*)ptr_from_va(va_from_pa(ptable.root));
+	ret = ffa_memory_traverse_ptable_recursive(vm_locked, 
+		from_locked, page_table, curr_level, vm->el0_partition);
+
 	return ret;
 }

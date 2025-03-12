@@ -136,8 +136,9 @@ static inline bool ffa_versions_are_compatible(enum ffa_version caller,
 #define FFA_CONSOLE_LOG_64                  0xC400008A
 #define FFA_PARTITION_INFO_GET_REGS_64      0xC400008B
 #define FFA_EL3_INTR_HANDLE_32              0x8400008C
-#define FFA_MSG_SEND_DIRECT_REQ2_64	    0xC400008D
+#define FFA_MSG_SEND_DIRECT_REQ2_64         0xC400008D
 #define FFA_MSG_SEND_DIRECT_RESP2_64        0xC400008E
+#define FFA_NS_RES_INFO_GET                 0xC400008F
 
 /**
  * FF-A error codes.
@@ -264,6 +265,12 @@ static inline const char *ffa_func_name(uint32_t func)
 		return "FFA_MEM_PERM_GET_64";
 	case FFA_MEM_PERM_SET_64:
 		return "FFA_MEM_PERM_SET_64";
+	case FFA_MSG_SEND_DIRECT_REQ2_64:
+		return "FFA_MSG_SEND_DIRECT_REQ2_64";
+	case FFA_MSG_SEND_DIRECT_RESP2_64:
+		return "FFA_MSG_SEND_DIRECT_RESP2_64";
+	case FFA_NS_RES_INFO_GET:
+		return "FFA_NS_RES_INFO_GET";
 
 	/* Implementation-defined ABIs. */
 	case FFA_CONSOLE_LOG_32:
@@ -1617,6 +1624,28 @@ ffa_endpoint_get_tx_memory_region(struct ffa_endpoint_rx_tx_descriptor *desc)
 	return (struct ffa_composite_memory_region *)((char *)desc +
 						      desc->tx_offset);
 }
+
+#pragma pack(1)
+typedef struct {
+	uint64_t base_address;
+	uint32_t page_count;
+	uint8_t permissions;
+	uint16_t endpoint_id;
+	uint8_t reserved;
+} ffa_address_map_desc;
+
+typedef struct {
+	uint32_t amd_size;
+	uint32_t amd_count;
+	uint32_t amd_offset;
+	uint32_t reserved;
+} ffa_resource_info_desc_header;
+
+typedef struct {
+	ffa_resource_info_desc_header header;
+	ffa_address_map_desc amd_array;
+} ffa_resource_info_desc;
+#pragma pack()
 
 void ffa_memory_region_init_header(struct ffa_memory_region *memory_region,
 				   ffa_id_t sender,
